@@ -43,6 +43,7 @@ const BACKUP_INTERVAL_MS = 60 * 60 * 1000; // 1 hour
 // ── Database Setup ─────────────────────────────────────────────────
 
 let db;
+let queries;
 
 function initDatabase() {
     db = new Database(DB_PATH);
@@ -99,6 +100,85 @@ function initDatabase() {
     db.exec(`CREATE INDEX IF NOT EXISTS idx_vault_members ON vault_members(vault_id)`);
 
     console.log('✓ Database initialized');
+    
+    // Prepare queries after database is initialized
+    prepareQueries();
+}
+
+function prepareQueries() {
+    queries = {
+        createVault: db.prepare(`
+            INSERT OR IGNORE INTO vaults (id, type, created_at, member_count)
+            VALUES (?, ?, ?, 0)
+        `),
+
+        getVault: db.prepare(`SELECT * FROM vaults WHERE id = ?`),
+
+        incrementMemberCount: db.prepare(`
+            UPDATE vaults SET member_count = member_count + 1 WHERE id = ?
+        `),
+
+        decrementMemberCount: db.prepare(`
+            UPDATE vaults SET member_count = CASE WHEN member_count > 0 THEN member_count - 1 ELSE 0 END WHERE id = ?
+        `),
+
+        addMember: db.prepare(`
+            INSERT OR IGNORE INTO vault_members (vault_id, user_id, joined_at)
+            VALUES (?, ?, ?)
+        `),
+
+        removeMember: db.prepare(`
+            DELETE FROM vault_members WHERE vault_id = ? AND user_id = ?
+        `),
+
+        getMemberCount: db.prepare(`
+            SELECT COUNT(*) as count FROM vault_members WHERE vault_id = ?
+        `),
+
+        insertMessage: db.prepare(`
+            INSERT OR IGNORE INTO messages (id, vault_id, blob, timestamp, created_at)
+            VALUES (?, ?, ?, ?, ?)
+        `),
+
+        getMessages: db.prepare(`
+            SELECT id, vault_id, blob, timestamp
+            FROM messages
+            WHERE vault_id = ? AND timestamp >= ?
+            ORDER BY timestamp ASC
+            LIMIT 500
+        `),
+
+        ackMessage: db.prepare(`
+            INSERT OR IGNORE INTO message_acks (message_id, user_id, acked_at)
+            VALUES (?, ?, ?)
+        `),
+
+        getMessageAckCount: db.prepare(`
+            SELECT COUNT(*) as count FROM message_acks WHERE message_id = ?
+        `),
+
+        deleteMessage: db.prepare(`DELETE FROM messages WHERE id = ?`),
+
+        deleteMessageAcks: db.prepare(`DELETE FROM message_acks WHERE message_id = ?`),
+
+        getVaultMessages: db.prepare(`
+            SELECT COUNT(*) as count FROM messages WHERE vault_id = ?
+        `),
+
+        getOldestMessages: db.prepare(`
+            SELECT id FROM messages WHERE vault_id = ? ORDER BY timestamp ASC LIMIT ?
+        `),
+
+        deleteVault: db.prepare(`DELETE FROM vaults WHERE id = ?`),
+
+        deleteVaultMessages: db.prepare(`DELETE FROM messages WHERE vault_id = ?`),
+
+        deleteVaultMembers: db.prepare(`DELETE FROM vault_members WHERE vault_id = ?`),
+
+        pruneOldMessages: db.prepare(`
+            DELETE FROM messages WHERE created_at < ?
+        `),
+    };
 }
 
 // ── Backup System ──────────────────────────────────────────────────
@@ -197,82 +277,6 @@ app.use((req, res, next) => {
     });
     next();
 });
-
-// ── Database Helpers ───────────────────────────────────────────────
-
-const queries = {
-    createVault: db.prepare(`
-        INSERT OR IGNORE INTO vaults (id, type, created_at, member_count)
-        VALUES (?, ?, ?, 0)
-    `),
-
-    getVault: db.prepare(`SELECT * FROM vaults WHERE id = ?`),
-
-    incrementMemberCount: db.prepare(`
-        UPDATE vaults SET member_count = member_count + 1 WHERE id = ?
-    `),
-
-    decrementMemberCount: db.prepare(`
-        UPDATE vaults SET member_count = CASE WHEN member_count > 0 THEN member_count - 1 ELSE 0 END WHERE id = ?
-    `),
-
-    addMember: db.prepare(`
-        INSERT OR IGNORE INTO vault_members (vault_id, user_id, joined_at)
-        VALUES (?, ?, ?)
-    `),
-
-    removeMember: db.prepare(`
-        DELETE FROM vault_members WHERE vault_id = ? AND user_id = ?
-    `),
-
-    getMemberCount: db.prepare(`
-        SELECT COUNT(*) as count FROM vault_members WHERE vault_id = ?
-    `),
-
-    insertMessage: db.prepare(`
-        INSERT OR IGNORE INTO messages (id, vault_id, blob, timestamp, created_at)
-        VALUES (?, ?, ?, ?, ?)
-    `),
-
-    getMessages: db.prepare(`
-        SELECT id, vault_id, blob, timestamp
-        FROM messages
-        WHERE vault_id = ? AND timestamp >= ?
-        ORDER BY timestamp ASC
-        LIMIT 500
-    `),
-
-    ackMessage: db.prepare(`
-        INSERT OR IGNORE INTO message_acks (message_id, user_id, acked_at)
-        VALUES (?, ?, ?)
-    `),
-
-    getMessageAckCount: db.prepare(`
-        SELECT COUNT(*) as count FROM message_acks WHERE message_id = ?
-    `),
-
-    deleteMessage: db.prepare(`DELETE FROM messages WHERE id = ?`),
-
-    deleteMessageAcks: db.prepare(`DELETE FROM message_acks WHERE message_id = ?`),
-
-    getVaultMessages: db.prepare(`
-        SELECT COUNT(*) as count FROM messages WHERE vault_id = ?
-    `),
-
-    getOldestMessages: db.prepare(`
-        SELECT id FROM messages WHERE vault_id = ? ORDER BY timestamp ASC LIMIT ?
-    `),
-
-    deleteVault: db.prepare(`DELETE FROM vaults WHERE id = ?`),
-
-    deleteVaultMessages: db.prepare(`DELETE FROM messages WHERE vault_id = ?`),
-
-    deleteVaultMembers: db.prepare(`DELETE FROM vault_members WHERE vault_id = ?`),
-
-    pruneOldMessages: db.prepare(`
-        DELETE FROM messages WHERE created_at < ?
-    `),
-};
 
 // ── TTL Pruner (runs every hour) ───────────────────────────────────
 
