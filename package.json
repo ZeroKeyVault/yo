@@ -1,6 +1,6 @@
 {
   "name": "redrabbit-relay",
-  "version": "2.0.0",
+  "version": "2.1.0",
   "description": "RedRabbit encrypted relay server — stores only opaque AES-GCM blobs",
   "main": "server.js",
   "scripts": {
