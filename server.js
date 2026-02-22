@@ -101,11 +101,12 @@ const nukeLimiter = rateLimit({
     message:         { success: false, error: 'Too many nuke requests.' },
 });
 
-// Tier 5 — Polling reads, 600 per min per IP
-// (1 client at 5-second interval = 12/min → 600 supports ~50 concurrent clients per IP).
+// Tier 5 — Polling reads, 1800 per min per IP.
+// 1 client at 2-second poll interval = 30 req/min.
+// 1800 supports ~60 concurrent clients per IP before throttle kicks in.
 const readLimiter = rateLimit({
     windowMs:        60 * 1000,
-    max:             600,
+    max:             1800,
     standardHeaders: true,
     legacyHeaders:   false,
     message:         { success: false, error: 'Too many read requests — please slow down.' },
@@ -362,13 +363,64 @@ app.post('/api/get_participant_count', readLimiter, (req, res) => {
     return res.json({ success: true, participantCount });
 });
 
-// nuke_user — wipes specified vaults from server entirely.
+// nuke_user — removes a user's presence cleanly without harming other vault members.
+//
+// Public vaults:  Remove userId from participants so they no longer block ack-deletion.
+//                 Pre-ack all pending messages on their behalf so remaining members
+//                 are not held waiting for an ack that will never come.
+//                 Vault and messages for other members remain fully intact.
+//
+// Private vaults: Only 2 people ever. If one nukes, delete vault + messages entirely
+//                 (the other person's private session is also gone by definition).
 app.post('/api/nuke_user', nukeLimiter, (req, res) => {
-    const { vaultIds } = req.body || {};
+    const { vaultIds, userId } = req.body || {};
 
-    if (Array.isArray(vaultIds)) {
-        for (const vid of vaultIds) {
-            if (typeof vid === 'string') {
+    if (!Array.isArray(vaultIds)) return res.json({ success: true });
+
+    for (const vid of vaultIds) {
+        if (typeof vid !== 'string') continue;
+
+        const vault = vaults.get(vid);
+
+        if (!vault) {
+            // Already gone — nothing to do.
+            continue;
+        }
+
+        if (vault.type === 'private') {
+            // Private vault: delete everything. The 2-person session is over.
+            messages.delete(vid);
+            vaults.delete(vid);
+
+        } else {
+            // Public vault: surgically remove only this user.
+            // 1. Pre-ack every pending message as this user so the remaining
+            //    members' ack threshold drops by one and deletion can proceed
+            //    once the others have all acked.
+            const list             = getVaultMsgs(vid);
+            const participantCount = vault.participants.size; // count BEFORE removal
+            const toDelete         = new Set();
+
+            for (const msg of list) {
+                msg.acknowledged.add(userId);
+                // After we remove this user, the new threshold is participantCount - 1.
+                // If the remaining acknowledged count (excluding us) already meets that
+                // threshold, mark for deletion now.
+                const othersAcked = msg.acknowledged.size; // includes userId we just added
+                if (participantCount > 1 && othersAcked >= participantCount) {
+                    toDelete.add(msg.id);
+                }
+            }
+
+            if (toDelete.size > 0) {
+                messages.set(vid, list.filter(m => !toDelete.has(m.id)));
+            }
+
+            // 2. Remove user from participant set permanently.
+            vault.participants.delete(userId);
+
+            // 3. GC the vault record if it is now empty.
+            if (vault.participants.size === 0) {
                 messages.delete(vid);
                 vaults.delete(vid);
             }
@@ -440,8 +492,8 @@ app.use((_req, res) => {
 
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, '0.0.0.0', () => {
-    console.log(`\nRedRabbit relay v2.3  port=${PORT}`);
+    console.log(`\nRedRabbit relay v2.4  port=${PORT}`);
     console.log('Blobs:  opaque AES-GCM only — server is blind to all content.');
-    console.log('Limits: global 300/min | write 60/min | create 10/min | nuke 3/min | read 600/min');
+    console.log('Limits: global 300/min | write 60/min | create 10/min | nuke 3/min | read 1800/min');
     console.log('TTL:    messages auto-deleted on full-ack OR after 7 days.\n');
 });
